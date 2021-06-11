@@ -164,7 +164,7 @@ object db {
 }
 object main extends App {
 
-  def standardlize(obj: Json) = {
+  def standardize(obj: Json) = {
     for {
       metaData <- root.metaData.obj.getOption(obj)
       mediaFiles <- root.mediaFiles.arr.getOption(obj)
@@ -183,7 +183,7 @@ object main extends App {
 
     stream.categoryPackages(xs)
       .flatMap(stream.items)
-      .map(standardlize).collectSome
+      .map(standardize).collectSome
       .mapMParUnordered(16)(obj => db.upsert(obj.asJson))
       .zipWithIndex
       .tap {
