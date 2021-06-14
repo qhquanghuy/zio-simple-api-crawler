@@ -9,6 +9,7 @@ import sttp.capabilities._
 import sttp.client3.circe._
 import sttp.client3._
 import sttp.client3.asynchttpclient.zio._
+import sttp.model.Uri
 
 import io.circe.generic.auto._
 import io.circe.Json
@@ -25,7 +26,7 @@ object api {
   }
 
 
-  def mkUri(path: String) = ZIO.access[Has[ApiConfig]](_.get).map(host => uri"${host}${path}")
+  def mkUri(path: String) = ZIO.access[Has[ApiConfig]](_.get).map(conf => Uri.unsafeParse(s"${conf.host}$path"))
 
   def getDataOfCategory(category: String, ageTag: String, timeOfDay: String) = {
     mkUri("/content/all")
@@ -43,11 +44,10 @@ object api {
   }
 
   def getDataOfSubCategory(category: String, subCategory: String, ageTag: String, timeOfDay: String) = {
-    val _uri = uri"/content/all"
     mkUri("/content/all")
       .map { uri =>
         baseReq.get(
-          _uri
+          uri
             .addPath(category, subCategory)
             .addParam("ageTag", ageTag)
             .addParam("timeOfDayTag", timeOfDay)
