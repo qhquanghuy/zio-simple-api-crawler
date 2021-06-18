@@ -236,7 +236,7 @@ object main extends App {
                    |Total run times: ${start.until(endTime, ChronoUnit.MINUTES)}m ${start.until(endTime, ChronoUnit.SECONDS)}s
                    |""".stripMargin
     } yield message)
-    .tapBoth(e => {
+    .foldM(e => {
       log.throwable("Exception", e) *> api.sendFacebookMessage(e.getMessage)
     }, message => {
       log.info(message) *> api.sendFacebookMessage(message)
