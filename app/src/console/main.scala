@@ -235,7 +235,7 @@ object main extends App {
         ZSink.foldLeft(0 -> 0) {
           case ((totalSuccess, totalFailure), Right(json)) =>
             val success = root.success.int.getOption(json).map(_ + totalSuccess).getOrElse(totalSuccess)
-            val failure = root.failure.int.getOption(json).map(_ + totalSuccess).getOrElse(totalSuccess)
+            val failure = root.failure.int.getOption(json).map(_ + totalFailure).getOrElse(totalFailure)
             success -> failure
           case (acc, Left(throwable)) => acc
         }
