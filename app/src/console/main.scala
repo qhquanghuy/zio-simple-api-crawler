@@ -26,10 +26,12 @@ import io.circe.bson._
 import io.circe.parser._
 
 import reactivemongo.api.MongoConnection
+import reactivemongo.api.DB
 import reactivemongo.api.bson._
 import reactivemongo.api.bson.collection._
 
 import aliases._
+import reactivemongo.api.Cursor
 
 
 
@@ -86,6 +88,17 @@ object stream {
     }
   }
 
+  def deviceToken() = {
+    val initState: Option[BSONObjectID] = None
+    val pageSize = 1000
+    ZStream.unfoldM(initState) { maybeLastId =>
+      db.fetch(maybeLastId, pageSize)
+        .map { xs =>
+          if (xs.isEmpty) None else Some(xs -> xs.lastOption.map(_.id))
+        }
+    }
+  }
+
 }
 
 object jsonutil {
@@ -120,17 +133,21 @@ object db {
 
   trait Service {
     def upsert(json: Json): ZIO[Logging, Throwable, Unit]
+    def fetch(maybeLastId: Option[BSONObjectID], pageSize: Int): ZIO[Logging, Throwable, Array[DeviceToken]]
   }
 
   object Service {
 
     lazy val live = {
-      ZLayer.fromService { (collection: BSONCollection) =>
-       new Service {
+      ZLayer.fromService { (pair: (DB, MongoConfig)) =>
+        val (db, conf) = pair
+        lazy val collection = db.collection(conf.collection)
+        lazy val deviceTokens = db.collection("deviceTokens")
+        new Service {
           private def json2BSONDoc(json: Json) = ZIO.fromEither(jsonToBson(json))
             .collect(new IllegalArgumentException("Inserting Json  must be an Object")) { case doc: BSONDocument => doc }
           override def upsert(json: Json) = {
-             val action = for {
+            val action = for {
               bdoc <- json2BSONDoc(json)
               id <- ZIO.fromTry(Try(root.id.int.getOption(json).get))
               _ <- log.info(s"Loading ${id}")
@@ -152,6 +169,25 @@ object db {
 
             action
           }
+
+
+          override def fetch(maybeLastId: Option[BSONObjectID], pageSize: Int): ZIO[Logging, Throwable, Array[DeviceToken]] = {
+            ZIO.fromFuture { implicit ec =>
+              val filter = maybeLastId
+                .map(lastId =>
+                  BSONDocument("_id" -> BSONDocument("$lt" -> lastId))
+                )
+                .getOrElse(BSONDocument())
+
+              deviceTokens.find(filter)
+                .sort(BSONDocument("_id" -> -1))
+                .cursor[DeviceToken]()
+                .collect(pageSize, Cursor.ContOnError { (a: Array[DeviceToken], throwable) =>
+                  throwable.printStackTrace()
+                })
+            }
+          }
+
         }
       }
     }
@@ -160,6 +196,11 @@ object db {
   def upsert(json: Json) = {
      ZIO.access[Has[db.Service]](_.get)
       .flatMap(_.upsert(json))
+  }
+
+  def fetch(maybeLastId: Option[BSONObjectID], pageSize: Int) = {
+     ZIO.access[Has[db.Service]](_.get)
+      .flatMap(_.fetch(maybeLastId, pageSize))
   }
 }
 object main extends App {
@@ -190,6 +231,7 @@ object main extends App {
         case (_, idx) => log.info(s"${idx}th Loaded")
       }
       .run(ZSink.count)
+
   }
 
 
@@ -215,14 +257,14 @@ object main extends App {
 
     val mongoLayer = configLayer >>> mongo.layer
 
-    val collectionLayer = ZLayer.fromServiceM { (conn: MongoConnection) =>
+    val dbLayer = ZLayer.fromServiceM { (conn: MongoConnection) =>
       for {
         conf <- ZIO.access[MongoConf](_.get)
-        collection <- ZIO.fromFuture(implicit ec => conn.database(conf.database).map(_.collection(conf.collection)))
-      } yield collection
+        db <- ZIO.fromFuture(implicit ec => conn.database(conf.database))
+      } yield db -> conf
     }
 
-    val dbServiceLayer = (mongoLayer ++ configLayer) >>> collectionLayer >>> db.Service.live
+    val dbServiceLayer = (mongoLayer ++ configLayer) >>> dbLayer >>> db.Service.live
 
     val layer = httpClientLayer ++ dbServiceLayer ++ logLayer ++ facebookConfigLayer
 
