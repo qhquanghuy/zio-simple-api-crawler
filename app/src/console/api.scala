@@ -84,4 +84,22 @@ object api {
       send(req)
     }
   }
+
+
+  def sendFCM(key: String, appId: String, deviceTokens: Array[String]) = {
+    val req = basicRequest.post(uri"https://fcm.googleapis.com/fcm/send")
+      .header("Authorization", s"key=${key}")
+      .body(
+        Json.obj(
+          "registration_ids" -> deviceTokens.asJson,
+          "notification" -> Json.obj(
+            "title" -> appId.asJson,
+            "body" -> "There are several new content! Check it out".asJson
+          )
+        )
+      )
+      .response(asJson[Json])
+
+    run(req)
+  }
 }

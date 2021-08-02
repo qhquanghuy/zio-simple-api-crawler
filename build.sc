@@ -12,6 +12,7 @@ object app extends ScalaModule {
     ivy"org.reactivemongo::reactivemongo-bson-api:1.0.4",
     ivy"org.reactivemongo::reactivemongo:1.0.4",
     ivy"dev.zio::zio-config-magnolia:1.0.6",
+    ivy"dev.zio::zio-config-typesafe:1.0.6",
     ivy"dev.zio::zio-logging-slf4j:0.5.10"
   )
 

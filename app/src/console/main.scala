@@ -3,7 +3,7 @@ package console
 import scala.util.Try
 import scala.concurrent.duration.{Duration => ScDuration, _}
 import java.time.temporal.ChronoUnit
-import java.nio.file.Paths
+import java.io.File
 
 import zio._
 import zio.console._
@@ -13,6 +13,8 @@ import zio.config.magnolia.DeriveConfigDescriptor
 import zio.config.ZConfig
 import zio.duration.Duration
 import zio.logging._
+import zio.config.syntax._
+import zio.config.typesafe.TypesafeConfig
 
 import sttp.client3.SttpBackend
 import sttp.capabilities.zio._
@@ -25,19 +27,16 @@ import io.circe.optics.JsonPath._
 import io.circe.bson._
 import io.circe.parser._
 
-import reactivemongo.api.MongoConnection
-import reactivemongo.api.DB
+import reactivemongo.api._
 import reactivemongo.api.bson._
 import reactivemongo.api.bson.collection._
 
 import aliases._
-import reactivemongo.api.Cursor
 
 
 
 object aliases {
   type SttpClient = Has[SttpBackend[Task, ZioStreams with WebSockets]]
-  type MongoConn = Has[MongoConnection]
   type MongoConf = Has[MongoConfig]
 }
 
@@ -88,7 +87,7 @@ object stream {
     }
   }
 
-  def deviceToken() = {
+  def deviceTokens() = {
     val initState: Option[BSONObjectID] = None
     val pageSize = 1000
     ZStream.unfoldM(initState) { maybeLastId =>
@@ -214,6 +213,37 @@ object main extends App {
   }
 
 
+
+  def sendFCM(fcmConfig: FCMConfig) = {
+    val keys = Map(
+      "Meditation Music" -> fcmConfig.meditationMusicKey,
+      "Relax Sound" -> fcmConfig.relaxSoundKey
+    )
+    stream.deviceTokens()
+      .flatMap { deviceTokens =>
+        val groups = deviceTokens.groupBy(_.appId)
+        ZStream.fromIterable(groups)
+      }
+      .mapM {
+        case (appId, deviceTokens) => api.sendFCM(keys(appId), appId, deviceTokens.map(_.deviceToken)).either
+      }
+      .tap {
+        case Right(json) => log.info(s"main::sendFCM ${json.toString()}")
+        case Left(throwable) => log.error(s"main::sendFCM", Cause.Die(throwable))
+      }
+      .run(
+        ZSink.foldLeft(0 -> 0) {
+          case ((totalSuccess, totalFailure), Right(json)) =>
+            val success = root.success.int.getOption(json).map(_ + totalSuccess).getOrElse(totalSuccess)
+            val failure = root.failure.int.getOption(json).map(_ + totalSuccess).getOrElse(totalSuccess)
+            success -> failure
+          case (acc, Left(throwable)) => acc
+        }
+      )
+  }
+
+
+
   def program = {
     val xs = for {
       category <- constants.categories
@@ -222,7 +252,7 @@ object main extends App {
     } yield (category, ageTag, timeOfDay)
 
 
-    stream.categoryPackages(xs)
+    val crawlEff = stream.categoryPackages(xs)
       .flatMap(stream.items)
       .map(standardize).collectSome
       .mapMParUnordered(16)(obj => db.upsert(obj.asJson))
@@ -232,6 +262,11 @@ object main extends App {
       }
       .run(ZSink.count)
 
+    for {
+      crawlTotal <- crawlEff
+      fcmConfig <- ZIO.access[Has[FCMConfig]](_.get)
+      batchCount <- sendFCM(fcmConfig)
+    } yield crawlTotal -> batchCount
   }
 
 
@@ -240,20 +275,16 @@ object main extends App {
 
   def run(args: List[String]): URIO[ZEnv, ExitCode] = {
 
+    val appConfigLayer = TypesafeConfig.fromHoconFile(new File("./.env.conf"), DeriveConfigDescriptor.descriptor[AppConfig])
+
     val logLayer = Logging.console()
 
-    val configDescriptor = DeriveConfigDescriptor.descriptor[MongoConfig]
-
-    val apiConfigLayer = ZConfig.fromSystemEnv(
-      DeriveConfigDescriptor.descriptor[ApiConfig].mapKey(k => s"API_${k.toUpperCase()}")
-    )
+    val apiConfigLayer = appConfigLayer.narrow(_.api)
     val httpClientLayer = AsyncHttpClientZioBackend.layer() ++ apiConfigLayer
 
-    val configLayer = ZConfig.fromCommandLineArgs(args, configDescriptor)
-
-    val facebookConfigLayer = ZConfig.fromSystemEnv(
-      DeriveConfigDescriptor.descriptor[FacebookConfig].mapKey(str => s"FB_${str.toUpperCase()}")
-    )
+    val fcmConfigLayer = appConfigLayer.narrow(_.fcm)
+    val configLayer = appConfigLayer.narrow(_.db)
+    val facebookConfigLayer = appConfigLayer.narrow(_.fb)
 
     val mongoLayer = configLayer >>> mongo.layer
 
@@ -266,15 +297,16 @@ object main extends App {
 
     val dbServiceLayer = (mongoLayer ++ configLayer) >>> dbLayer >>> db.Service.live
 
-    val layer = httpClientLayer ++ dbServiceLayer ++ logLayer ++ facebookConfigLayer
+    val layer = httpClientLayer ++ dbServiceLayer ++ logLayer ++ facebookConfigLayer ++ fcmConfigLayer
 
     (for {
       start <- instant
       _ <- log.info(s"Starting...")
-      count <- program
+      (crawlCount, (success, failure)) <- program
       endTime <- instant
       message = s"""
-                   |Crawl total $count records
+                   |Crawl total $crawlCount records
+                   |Send FCM $success success, $failure failure
                    |Total run times: ${start.until(endTime, ChronoUnit.MINUTES)}m ${start.until(endTime, ChronoUnit.SECONDS)}s
                    |""".stripMargin
     } yield message)
